@@ -27,23 +27,25 @@ var logger = log.WithFields(log.Fields{
 // K8s resources.
 type DatapointCache struct {
 	sync.Mutex
-	dpCache      map[types.UID][]*datapoint.Datapoint
-	dimPropCache map[types.UID]*atypes.DimProperties
-	uidKindCache map[types.UID]string
-	podCache     *k8sutil.PodCache
-	serviceCache *k8sutil.ServiceCache
-	useNodeName  bool
+	dpCache         map[types.UID][]*datapoint.Datapoint
+	dimPropCache    map[types.UID]*atypes.DimProperties
+	uidKindCache    map[types.UID]string
+	podCache        *k8sutil.PodCache
+	serviceCache    *k8sutil.ServiceCache
+	replicaSetCache *k8sutil.ReplicaSetCache
+	useNodeName     bool
 }
 
 // NewDatapointCache creates a new clean cache
 func NewDatapointCache(useNodeName bool) *DatapointCache {
 	return &DatapointCache{
-		dpCache:      make(map[types.UID][]*datapoint.Datapoint),
-		dimPropCache: make(map[types.UID]*atypes.DimProperties),
-		uidKindCache: make(map[types.UID]string),
-		podCache:     k8sutil.NewPodCache(),
-		serviceCache: k8sutil.NewServiceCache(),
-		useNodeName:  useNodeName,
+		dpCache:         make(map[types.UID][]*datapoint.Datapoint),
+		dimPropCache:    make(map[types.UID]*atypes.DimProperties),
+		uidKindCache:    make(map[types.UID]string),
+		podCache:        k8sutil.NewPodCache(),
+		serviceCache:    k8sutil.NewServiceCache(),
+		replicaSetCache: k8sutil.NewReplicaSetCache(),
+		useNodeName:     useNodeName,
 	}
 }
 
@@ -66,6 +68,8 @@ func (dc *DatapointCache) DeleteByKey(key interface{}) {
 		dc.podCache.DeleteByKey(cacheKey)
 	case "Service":
 		dc.handleDeleteService(cacheKey)
+	case "ReplicaSet":
+		dc.replicaSetCache.DeleteByKey(cacheKey)
 	}
 	delete(dc.uidKindCache, cacheKey)
 	delete(dc.dpCache, cacheKey)
@@ -112,8 +116,7 @@ func (dc *DatapointCache) HandleAdd(newObj runtime.Object) interface{} {
 		dimProps = dimPropsForDeployment(o)
 		kind = "Deployment"
 	case *v1beta1.ReplicaSet:
-		dps = datapointsForReplicaSet(o)
-		dimProps = dimPropsForReplicaSet(o)
+		dps, dimProps = dc.handleAddReplicaSet(o)
 		kind = "ReplicaSet"
 	case *v1.ResourceQuota:
 		dps = datapointsForResourceQuota(o)
@@ -154,15 +157,6 @@ func (dc *DatapointCache) HandleAdd(newObj runtime.Object) interface{} {
 	return key
 }
 
-type propertyLink struct {
-	SourceProperty string
-	SourceKind     string
-	SourceJoinKey  string
-	TargetProperty string
-	TargetKind     string
-	TargetJoinKey  string
-}
-
 // addDimPropsToCache maps and syncs properties from different resources together and adds
 // them to the cache
 func (dc *DatapointCache) addDimPropsToCache(key types.UID, dimProps *atypes.DimProperties) {
@@ -179,7 +173,7 @@ func (dc *DatapointCache) handleAddPod(pod *v1.Pod) ([]*datapoint.Datapoint,
 	cachedPod := dc.podCache.GetCachedPod(pod.UID)
 	dps := datapointsForPod(pod)
 	if cachedPod != nil {
-		dimProps := dimPropsForPod(cachedPod, dc.serviceCache)
+		dimProps := dimPropsForPod(cachedPod, dc.serviceCache, dc.replicaSetCache)
 		return dps, dimProps
 	}
 	return dps, nil
@@ -195,7 +189,7 @@ func (dc *DatapointCache) handleAddService(svc *v1.Service) {
 			for _, podUID := range dc.podCache.GetPodsInNamespace(svc.Namespace) {
 				cachedPod := dc.podCache.GetCachedPod(podUID)
 				if cachedPod != nil {
-					dimProps := dimPropsForPod(cachedPod, dc.serviceCache)
+					dimProps := dimPropsForPod(cachedPod, dc.serviceCache, dc.replicaSetCache)
 					if dimProps != nil {
 						dc.addDimPropsToCache(podUID, dimProps)
 					}
@@ -208,16 +202,35 @@ func (dc *DatapointCache) handleAddService(svc *v1.Service) {
 // handleDeleteService will remove a service from the internal cache
 // and remove the service tags on it's matching pods.
 func (dc *DatapointCache) handleDeleteService(svcUID types.UID) {
-	pods := dc.serviceCache.DeleteByKey(svcUID)
-	for _, podUID := range pods {
+	for _, podUID := range dc.serviceCache.DeleteByKey(svcUID) {
 		cachedPod := dc.podCache.GetCachedPod(podUID)
 		if cachedPod != nil {
-			dimProps := dimPropsForPod(cachedPod, dc.serviceCache)
+			dimProps := dimPropsForPod(cachedPod, dc.serviceCache, dc.replicaSetCache)
 			if dimProps != nil {
 				dc.addDimPropsToCache(podUID, dimProps)
 			}
 		}
 	}
+}
+
+// handleAddReplicaSet adds a replicaset to the internal cache and
+// returns the datapoints and dimProps for the replicaset.
+func (dc *DatapointCache) handleAddReplicaSet(rs *v1beta1.ReplicaSet) ([]*datapoint.Datapoint, *atypes.DimProperties) {
+	if !dc.replicaSetCache.IsCached(rs) {
+		dc.replicaSetCache.AddReplicaSet(rs)
+		for _, podUID := range dc.podCache.GetPodsInNamespace(rs.Namespace) {
+			cachedPod := dc.podCache.GetCachedPod(podUID)
+			if cachedPod != nil {
+				dimProps := dimPropsForPod(cachedPod, dc.serviceCache, dc.replicaSetCache)
+				if dimProps != nil {
+					dc.addDimPropsToCache(podUID, dimProps)
+				}
+			}
+		}
+	}
+	dps := datapointsForReplicaSet(rs)
+	dimProps := dimPropsForReplicaSet(rs)
+	return dps, dimProps
 }
 
 // AllDatapoints returns all of the cached datapoints.
