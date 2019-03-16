@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/signalfx/signalfx-agent/internal/core/config/sources/vault/auth"
 	"github.com/signalfx/signalfx-agent/internal/core/config/types"
 	log "github.com/sirupsen/logrus"
 
@@ -47,7 +48,9 @@ type Config struct {
 	// The polling interval for checking KV V2 secrets for a new version.  This
 	// can be any string value that can be parsed by
 	// https://golang.org/pkg/time/#ParseDuration.
-	KVV2PollInterval time.Duration `yaml:"kvV2PollInterval" default:"60s"`
+	KVV2PollInterval time.Duration  `yaml:"kvV2PollInterval" default:"60s"`
+	AuthMethod       string         `yaml:"authMethod"`
+	IAM              auth.IAMConfig `yaml:"iam" default:"{}"`
 }
 
 // Validate the config
@@ -56,9 +59,9 @@ func (c *Config) Validate() error {
 	if c.KVV2PollInterval == time.Duration(0) {
 		c.KVV2PollInterval = 60 * time.Second
 	}
-	if c.VaultToken == "" {
+	if c.VaultToken == "" && AuthMethod == nil {
 		if os.Getenv("VAULT_TOKEN") == "" {
-			return errors.New("vault token is required, either in the agent config or the envvar VAULT_TOKEN")
+			return errors.New("vault token is required, either in the agent config, the envvar VAULT_TOKEN, or via an authMethod")
 		}
 
 		c.VaultToken = os.Getenv("VAULT_TOKEN")
@@ -84,7 +87,22 @@ func New(conf *Config) (types.ConfigSource, error) {
 		return nil, err
 	}
 
-	c.SetToken(conf.VaultToken)
+	if conf.AuthMethod == "" {
+		c.SetToken(conf.VaultToken)
+	} else {
+		var tokenSecret *api.Secret
+		for _, am := range []auth.Method{
+			conf.IAM,
+		} {
+			if conf.AuthMethod == am.Name() {
+				tokenSecret, err := am.GetToken(c)
+				if err != nil {
+					return nil, fmt.Errorf("could not get token from auth method %s: %v", conf.AuthMethod, err)
+				}
+				c.SetToken(tokenSecret.Auth.ClientToken)
+			}
+		}
+	}
 
 	vcs := &vaultConfigSource{
 		client:                            c,
