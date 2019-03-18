@@ -23,7 +23,7 @@ function versions_go() {
 function signalfx-agent([string]$AGENT_VERSION="", [string]$AGENT_BIN=".\signalfx-agent.exe", [string]$COLLECTD_VERSION="") {
     versions_go
 
-    go build -o "$AGENT_BIN" github.com/signalfx/signalfx-agent/cmd/agent
+    go build -mod vendor -o "$AGENT_BIN" github.com/signalfx/signalfx-agent/cmd/agent
     if ($lastexitcode -ne 0){ exit $lastexitcode }
 }
 
@@ -106,7 +106,8 @@ function lint() {
 }
 
 function vendor() {
-    dep ensure
+    go mod tidy
+    go mod vendor
     if ($lastexitcode -ne 0){ exit $lastexitcode }
 }
 
