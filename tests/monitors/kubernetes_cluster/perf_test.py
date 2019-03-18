@@ -396,11 +396,8 @@ def test_large_k8s_cluster_deployment_prop():
             assert wait_for(go_routines, interval_seconds=2, timeout_seconds=60)
 
             def heap_baselined():
-                pprof_client.save_goroutines()
+                pprof_client.save_heap()
                 heap_usage = backend.datapoints_by_metric["sfxagent.go_heap_alloc"][-1].value.intValue
-                print("-------------------------")
-                print(heap_usage_baseline)
-                print(heap_usage)
                 return (
                     backend.datapoints_by_metric["sfxagent.go_heap_alloc"][-1].value.intValue
                     < 1.25 * heap_usage_baseline
